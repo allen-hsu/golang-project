@@ -2,10 +2,11 @@ package web
 
 import (
 	"fmt"
-	"github.com/stretchr/testify/assert"
 	"net/http"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func Test_router_AddRoute(t *testing.T) {
@@ -464,6 +465,19 @@ func Test_router_findRoute(t *testing.T) {
 			name:   "star match",
 			method: http.MethodPost,
 			path:   "/order/delete",
+			found:  true,
+			mi: &matchInfo{
+				n: &node{
+					path:    "*",
+					handler: mockHandler,
+				},
+			},
+		},
+		{
+			// 命中/order/*
+			name:   "star match",
+			method: http.MethodPost,
+			path:   "/order/delete/abc/cdf/efg",
 			found:  true,
 			mi: &matchInfo{
 				n: &node{
