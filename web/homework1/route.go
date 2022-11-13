@@ -1,7 +1,9 @@
 package web
 
 import (
+	"fmt"
 	"regexp"
+	"strings"
 )
 
 type router struct {
@@ -24,13 +26,80 @@ func newRouter() router {
 // - 不能在同一个位置同时注册通配符路由和参数路由，例如 /user/:id 和 /user/* 冲突
 // - 同名路径参数，在路由匹配的时候，值会被覆盖。例如 /user/:id/abc/:id，那么 /user/123/abc/456 最终 id = 456
 func (r *router) addRoute(method string, path string, handler HandleFunc) {
-	panic("implement me")
+	if path == "" {
+		panic("path is empty")
+	}
+	if path[0] != '/' {
+		panic("path must start with /")
+	}
+
+	if path != "/" && path[len(path)-1] == '/' {
+		panic("path must not end with /")
+	}
+
+	root, ok := r.trees[method]
+	if !ok {
+		root = &node{path: "/"}
+		r.trees[method] = root
+	}
+
+	if path == "/" {
+		if root.handler != nil {
+			panic("path conflict")
+		}
+		root.handler = handler
+		return
+	}
+
+	segments := strings.Split(path[1:], "/")
+
+	for _, s := range segments {
+		if s == "" {
+			panic(fmt.Sprintf("path %s is invalid", path))
+		}
+		root = root.childOrCreate(s)
+	}
+
+	if root.handler != nil {
+		panic(fmt.Sprintf("path %s conflict", path))
+	}
+
+	root.handler = handler
 }
 
 // findRoute 查找对应的节点
 // 注意，返回的 node 内部 HandleFunc 不为 nil 才算是注册了路由
 func (r *router) findRoute(method string, path string) (*matchInfo, bool) {
-	panic("implement me")
+	root, ok := r.trees[method]
+	if !ok {
+		return nil, false
+	}
+
+	if path == "/" {
+		return &matchInfo{n: root}, true
+	}
+
+	segments := strings.Split(path[1:], "/")
+	mi := &matchInfo{}
+
+	for _, s := range segments {
+		var child *node
+		child, ok = root.childOf(s)
+		if !ok {
+			if root.typ == nodeTypeAny {
+				mi.n = root
+				return mi, true
+			}
+			return nil, false
+		}
+		if child.paramName != "" {
+			mi.addValue(child.paramName, s)
+		}
+		root = child
+	}
+
+	mi.n = root
+	return mi, true
 }
 
 type nodeType int
@@ -79,7 +148,27 @@ type node struct {
 // 第一个返回值 *node 是命中的节点
 // 第二个返回值 bool 代表是否命中
 func (n *node) childOf(path string) (*node, bool) {
-	panic("implement me")
+	if n.children == nil {
+		return n.childOfNonStatic(path)
+	}
+	res, ok := n.children[path]
+	if !ok {
+		return n.childOfNonStatic(path)
+	}
+	return res, ok
+}
+
+
+func (n *node) childOfNonStatic(path string) (*node, bool) {
+	if n.regChild != nil {
+		if n.regChild.regExpr.Match([]byte(path)) {
+			return n.regChild, true
+		}
+	}
+	if n.paramChild != nil {
+		return n.paramChild, true
+	}
+	return n.starChild, n.starChild != nil
 }
 
 // childOrCreate 查找子节点，
@@ -88,9 +177,89 @@ func (n *node) childOf(path string) (*node, bool) {
 // 最后会从 children 里面查找，
 // 如果没有找到，那么会创建一个新的节点，并且保存在 node 里面
 func (n *node) childOrCreate(path string) *node {
-	panic("implement me")
+	if path == "*" {
+		if n.paramChild != nil {
+			panic(fmt.Sprintf("invalid path %s", path))
+		}
+
+		if n.regChild != nil {
+			panic(fmt.Sprintf("invalid path %s", path))
+		}
+
+		if n.starChild == nil {
+			n.starChild = &node{path: path, typ: nodeTypeAny}
+		}
+		return n.starChild
+	}
+
+	if path[0] == ':' {
+		paramName, expr, isReg := n.parseParam(path)
+		if isReg {
+			return n.childOrCreateReg(path, expr, paramName)
+		}
+		return n.childOrCreateParam(path, paramName)
+	}
+
+	if n.children == nil {
+		n.children = make(map[string]*node)
+	}
+	child, ok := n.children[path]
+	if !ok {
+		child = &node{path: path, typ: nodeTypeStatic}
+		n.children[path] = child
+	}
+	return child
 }
 
+func (n *node) childOrCreateParam(path string, paramName string) *node {
+	if n.regChild != nil {
+		panic(fmt.Sprintf("web: 非法路由，已有正则路由。不允许同时注册正则路由和参数路由 [%s]", path))
+	}
+	if n.starChild != nil {
+		panic(fmt.Sprintf("web: 非法路由，已有通配符路由。不允许同时注册通配符路由和参数路由 [%s]", path))
+	}
+	if n.paramChild != nil {
+		if n.paramChild.path != path {
+			panic(fmt.Sprintf("web: 路由冲突，参数路由冲突，已有 %s，新注册 %s", n.paramChild.path, path))
+		}
+	} else {
+		n.paramChild = &node{path: path, paramName: paramName, typ: nodeTypeParam}
+	}
+	return n.paramChild
+}
+
+func (n *node) childOrCreateReg(path string, expr string, paramName string) *node {
+	if n.starChild != nil {
+		panic(fmt.Sprintf("invalid path %s", path))
+	}
+	if n.paramChild != nil {
+		panic(fmt.Sprintf("invalid path %s", path))
+	}
+	if n.regChild != nil {
+		if n.regChild.regExpr.String() != expr || n.paramName != paramName {
+			panic(fmt.Sprintf("route conflict, already has %s, new register %s", n.regChild.regExpr.String(), expr))
+		}
+	} else {
+		regExpr, err := regexp.Compile(expr)
+		if err != nil {
+			panic(fmt.Errorf("regexp compile error: %s", err))
+		}
+		n.regChild = &node{path: path, paramName: paramName, regExpr: regExpr, typ: nodeTypeReg}
+	}
+	return n.regChild
+}
+
+func (n *node) parseParam(path string) (string, string, bool) {
+	path = path[1:]
+	segs := strings.SplitN(path, "(", 2)
+	if len(segs) == 2 {
+		expr := segs[1]
+		if strings.HasSuffix(expr, ")") {
+			return segs[0], expr[:len(expr)-1], true
+		}
+	}
+	return path, "", false
+}
 type matchInfo struct {
 	n          *node
 	pathParams map[string]string
